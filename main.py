@@ -1,138 +1,196 @@
 # main.py
-# A single script to handle authentication, find a specific post, and extract its ID.
+# Script to handle authentication, find a specific post using fuzzy matching, and extract its ID using Selenium.
 
 import os
+import json
 import re
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+import time
+from difflib import SequenceMatcher
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
 
 # --- Configuration ---
-TARGET_URL = "https://x.com/StoicFaithDad"
-# The exact text of the post to find.
-TARGET_TEXT = "People often think that Honor and Deception cannot be combined, but this is not true. The greatest men possess both"
-AUTH_FILE_PATH = "auth.json"
-# Safety limit to prevent infinite scrolling.
+TARGET_URL = "https://x.com/StoicFaithDad/with_replies"
+TARGET_TEXT = "Trust's icebreaker: Small talk breaks barriers, fosters comfort. Start with 'How are you?' or 'What's new?' to spark authentic connections and deeper conversations."
+AUTH_FILE_PATH = "cookies.json"
 MAX_SCROLLS = 100
-# A common, realistic User-Agent string to avoid bot detection.[6, 7]
+SIMILARITY_THRESHOLD = 0.90  # 90% similarity threshold
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
 
 
-def main():
-    """
-    Main function to run the automation.
-    Handles a one-time login to create an auth file, then uses it for subsequent runs.
-    """
-    # --- Part 1: Handle Authentication if auth file does not exist ---
-    if not os.path.exists(AUTH_FILE_PATH):
-        print(f"Authentication file '{AUTH_FILE_PATH}' not found.")
-        print("A browser window will open. Please log in to X.com.")
-        print("If you see a CAPTCHA or 'robot' check, solve it manually in the browser window.")
-        print("After you have successfully logged in, press ENTER here to continue.")
-        with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=False,
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    "--disable-infobars",
-                    "--start-maximized",
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage"
-                ]
-            )
-            context = browser.new_context(
-                user_agent=USER_AGENT,
-                viewport={"width": 1280, "height": 800},
-                locale="en-US"
-            )
-            page = context.new_page()
-            page.goto("https://x.com/login")
-            input("After you have logged in and see your X.com home page, press ENTER here to continue...")
-            import time
-            print("Waiting 3 seconds before saving authentication state (to ensure cookies are set)...")
-            time.sleep(3)
-            try:
-                # Save the authentication state (cookies, local storage) to the file.
-                context.storage_state(path=AUTH_FILE_PATH)
-                print(f"Authentication state successfully saved to '{AUTH_FILE_PATH}'.")
-                print("You can now run the script again to find the post.")
-            except Exception as e:
-                print(f"Error: Could not save authentication state: {e}")
-            finally:
-                browser.close()
-        return  # End the script after creating the auth file.
+def normalize_text(text):
+    """Normalize text for better matching by removing extra whitespace and converting to lowercase."""
+    return ' '.join(text.lower().strip().split())
 
-    # --- Part 2: Find the Post and Extract ID using the auth file ---
-    print(f"\nAuthentication file found. Starting the search on {TARGET_URL}.")
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=False,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--disable-infobars",
-                "--start-maximized",
-                "--no-sandbox",
-                "--disable-dev-shm-usage"
-            ]
-        )
-        context = browser.new_context(
-            storage_state=AUTH_FILE_PATH,
-            user_agent=USER_AGENT,
-            viewport={"width": 1280, "height": 800},
-            locale="en-US"
-        )
-        page = context.new_page()
+
+def calculate_similarity(text1, text2):
+    """Calculate similarity ratio between two texts."""
+    normalized_text1 = normalize_text(text1)
+    normalized_text2 = normalize_text(text2)
+    return SequenceMatcher(None, normalized_text1, normalized_text2).ratio()
+
+
+def find_similar_text_elements(driver, target_text, threshold=0.90):
+    """Find elements with text similar to target_text above the threshold."""
+    # Get all text elements that might contain tweets
+    potential_elements = driver.find_elements(By.XPATH, "//div[@data-testid='tweetText']")
+
+    # Also check span elements that might contain tweet text
+    potential_elements.extend(driver.find_elements(By.XPATH, "//span[string-length(text()) > 50]"))
+
+    best_match = None
+    best_similarity = 0
+
+    for element in potential_elements:
         try:
-            print(f"Navigating to {TARGET_URL}...")
-            page.goto(TARGET_URL, wait_until="domcontentloaded")
-            # Wait for posts to load
-            page.wait_for_timeout(2000)
-            post_locator = page.get_by_text(TARGET_TEXT, exact=True)
-            print("Scrolling to find the target post...")
-            scroll_count = 0
-            while not post_locator.is_visible() and scroll_count < MAX_SCROLLS:
-                page.mouse.wheel(0, 1500)
-                scroll_count += 1
-                print(f"Scroll attempt {scroll_count}/{MAX_SCROLLS}...")
-                try:
-                    page.wait_for_load_state('networkidle', timeout=5000)
-                except PlaywrightTimeoutError:
-                    pass
-                page.wait_for_timeout(1000)
-            if not post_locator.is_visible():
-                print("\nCould not find the post after maximum scroll attempts.")
-                print("The post may have been deleted or the text may have changed.")
-                return
-            print("Post found. Clicking to navigate to its dedicated page...")
-            post_locator.click()
-            print("Waiting for URL to update...")
-            page.wait_for_url("**/status/**", timeout=30000)
-            final_url = page.url
-            print(f"Navigated to new URL: {final_url}")
-            match = re.search(r"/status/(\d+)", final_url)
-            if match:
-                status_id = match.group(1)
-                print(f"\n--- SUCCESS ---")
-                print(f"Extracted Status ID: {status_id}")
-            else:
-                print("\nCould not extract status ID from the final URL.")
-        except PlaywrightTimeoutError as e:
-            print(f"\nA timeout error occurred: {e}")
-            print("This could mean the element was not found, navigation failed, or the page took too long to load.")
+            element_text = element.text.strip()
+            if len(element_text) < 20:  # Skip very short texts
+                continue
+
+            similarity = calculate_similarity(target_text, element_text)
+
+            if similarity >= threshold and similarity > best_similarity:
+                best_match = element
+                best_similarity = similarity
+                print(f"Found potential match (similarity: {similarity:.2f}): {element_text[:100]}...")
+
         except Exception as e:
-            print(f"\nAn unexpected error occurred: {e}")
-        finally:
-            try:
-                context.storage_state(path=AUTH_FILE_PATH)
-                print(f"Updated authentication state saved to '{AUTH_FILE_PATH}'.")
-            except Exception as e:
-                print(f"Warning: Could not update authentication state: {e}")
-            print("Closing browser.")
-            browser.close()
+            continue  # Skip elements that can't be processed
+
+    return best_match, best_similarity
+
+
+def save_cookies(driver, path):
+    cookies = driver.get_cookies()
+    with open(path, 'w') as f:
+        json.dump(cookies, f)
+
+
+def load_cookies(driver, path):
+    with open(path, 'r') as f:
+        cookies = json.load(f)
+    for cookie in cookies:
+        driver.add_cookie(cookie)
+
+
+def main():
+    # Set up Chrome options
+    options = Options()
+    options.add_argument(f"user-agent={USER_AGENT}")
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument("--start-maximized")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option('useAutomationExtension', False)
+
+    # Assume ChromeDriver is in PATH or specify path
+    driver = webdriver.Chrome(options=options)
+
+    try:
+        # Part 1: Handle Authentication if auth file does not exist
+        if not os.path.exists(AUTH_FILE_PATH):
+            print(f"Authentication file '{AUTH_FILE_PATH}' not found.")
+            print("Browser will open. Log in to X.com manually.")
+            print("After login, press ENTER here to continue.")
+            driver.get("https://x.com/login")
+            input("Press ENTER after successful login...")
+            time.sleep(3)  # Ensure cookies set
+            save_cookies(driver, AUTH_FILE_PATH)
+            print(f"Cookies saved to '{AUTH_FILE_PATH}'.")
+            driver.quit()
+            return
+
+        # Part 2: Load cookies and find post
+        print(f"\nUsing cookies to search on {TARGET_URL}.")
+        print(f"Looking for text similar to: {TARGET_TEXT}")
+        print(f"Similarity threshold: {SIMILARITY_THRESHOLD * 100}%")
+
+        driver.get("https://x.com")  # Load base to add cookies
+        load_cookies(driver, AUTH_FILE_PATH)
+        driver.get(TARGET_URL)
+
+        # Wait for page load
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+
+        print("Scrolling to find the target post...")
+        scroll_count = 0
+        last_height = driver.execute_script("return document.body.scrollHeight")
+        best_overall_match = None
+        best_overall_similarity = 0
+
+        while scroll_count < MAX_SCROLLS:
+            # Check for similar text on current page
+            match_element, similarity = find_similar_text_elements(driver, TARGET_TEXT, SIMILARITY_THRESHOLD)
+
+            if match_element and similarity > best_overall_similarity:
+                best_overall_match = match_element
+                best_overall_similarity = similarity
+
+                # If we found a very good match (95%+), we can stop searching
+                if similarity >= 0.95:
+                    print(f"Excellent match found (similarity: {similarity:.2f})!")
+                    break
+
+            # Scroll down
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            scroll_count += 1
+            print(f"Scroll attempt {scroll_count}/{MAX_SCROLLS}... (Best match so far: {best_overall_similarity:.2f})")
+            time.sleep(2)  # Initial wait
+            start_time = time.time()
+            while time.time() - start_time < 8:  # Up to additional 8s (total 10s)
+                new_height = driver.execute_script("return document.body.scrollHeight")
+                if new_height > last_height:
+                    break
+                time.sleep(1)  # Check every second
+            last_height = new_height if new_height > last_height else last_height
+
+        if not best_overall_match:
+            print(f"\nNo post found with similarity >= {SIMILARITY_THRESHOLD * 100}% after {MAX_SCROLLS} scrolls.")
+            print("Try lowering the SIMILARITY_THRESHOLD or increasing MAX_SCROLLS.")
+            return
+
+        print(f"\nBest match found with similarity: {best_overall_similarity:.2f}")
+        print(f"Matched text: {best_overall_match.text[:200]}...")
+        print("Clicking to navigate...")
+
+        # Scroll to element and click
+        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", best_overall_match)
+        time.sleep(1)
+        driver.execute_script("arguments[0].click();", best_overall_match)
+
+        # Wait for URL update
+        WebDriverWait(driver, 30).until(EC.url_contains("/status/"))
+
+        final_url = driver.current_url
+        print(f"Navigated to: {final_url}")
+
+        match = re.search(r"/status/(\d+)", final_url)
+        if match:
+            status_id = match.group(1)
+            print(f"\n--- SUCCESS ---")
+            print(f"Extracted Status ID: {status_id}")
+            print(f"Final similarity score: {best_overall_similarity:.2f}")
+        else:
+            print("\nCould not extract ID from URL.")
+
+    except TimeoutException as e:
+        print(f"\nTimeout: {e}")
+    except Exception as e:
+        print(f"\nError: {e}")
+    finally:
+        # Update cookies
+        save_cookies(driver, AUTH_FILE_PATH)
+        print(f"Updated cookies saved to '{AUTH_FILE_PATH}'.")
+        driver.quit()
 
 
 if __name__ == "__main__":
-    # It's a good idea to delete the old auth.json file if it exists,
-    # as it was created with a browser that was getting blocked.
     if os.path.exists(AUTH_FILE_PATH):
-        print(
-            f"An old '{AUTH_FILE_PATH}' was found. For the best results, consider deleting it and logging in again with the updated script.")
+        print(f"Old '{AUTH_FILE_PATH}' found. Consider deleting for fresh login.")
     main()

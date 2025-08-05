@@ -15,8 +15,16 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 
 # --- Configuration ---
-TARGET_URL = "https://x.com/StoicFaithDad/with_replies"
-TARGET_TEXT = "Trust's icebreaker: Small talk breaks barriers, fosters comfort. Start with 'How are you?' or 'What's new?' to spark authentic connections and deeper conversations."
+TARGET_URL = "https://x.com/StoicFaithDad" # "https://x.com/StoicFaithDad/with_replies"
+# The exact text of the post to find.
+TARGET_TEXT = """Must Survive in a Fistfight
+
+I know you’re a lover, not a fighter.
+
+This might clarify why, the last time you were in a fistfight, you ended up losing to a 12-year-old girl 
+
+(though to be fair, she was unusually strong for her age)
+"""
 AUTH_FILE_PATH = "cookies.json"
 MAX_SCROLLS = 100
 SIMILARITY_THRESHOLD = 0.90  # 90% similarity threshold
